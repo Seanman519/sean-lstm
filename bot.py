@@ -5,9 +5,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from datetime import timedelta, datetime
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
-from sklearn.svm import SVC
-import joblib
+from sklearn.preprocessing import MinMaxScaler
 import time
 from keras.models import Sequential, load_model
 from keras.layers import Dense, Activation, Conv1D, MaxPooling1D, Dropout, LSTM, Layer
@@ -30,19 +28,17 @@ terminal_info = mt5.terminal_info()
 
 # Show file path
 file_path = terminal_info.data_path + "\\MQL5\\Files\\"
-model_path = os.path.join('eurusd_model.keras')
-svm_model_path = os.path.join('svm_model.pkl')
-scaler_path = os.path.join('scaler.pkl')
+model_path = os.path.join('AUDUSD_model.keras')
 
 # Set start and end dates for history data
 end_date = datetime.now()
 start_date = end_date - timedelta(days=120)
 
-# Get EURUSD rates (15M) from start_date to end_date
-eurusd_rates = mt5.copy_rates_range("EURUSD", mt5.TIMEFRAME_M15, start_date, end_date)
+# Get AUDUSD rates (15M) from start_date to end_date
+AUDUSD_rates = mt5.copy_rates_range("AUDUSD", mt5.TIMEFRAME_M15, start_date, end_date)
 
 # Create dataframe
-df = pd.DataFrame(eurusd_rates)
+df = pd.DataFrame(AUDUSD_rates)
 
 # Prepare close prices only
 data = df.filter(['close']).values
@@ -116,64 +112,19 @@ def create_model_with_attention():
     model.compile(optimizer='adam', loss='mse', metrics=[rmse()])
     return model
 
-# Extract features for SVM
-def extract_features(data):
-    features = []
-    for i in range(time_step, len(data)):
-        current_price = data[i]
-        moving_average_5 = np.mean(data[i-5:i])
-        moving_average_15 = np.mean(data[i-15:i])
-        rsi = compute_rsi(data[i-14:i+1])
-        features.append([current_price, moving_average_5, moving_average_15, rsi])
-    return np.array(features)
-
-def compute_rsi(data, window=14):
-    delta = np.diff(data)
-    gain = (delta >= 0) * delta
-    loss = (delta < 0) * -delta
-    avg_gain = np.mean(gain[-window:])
-    avg_loss = np.mean(loss[-window:])
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-# Train SVM model
-def train_svm_model(x_train, y_train):
-    svm_model = SVC(kernel='rbf', C=1.0, gamma='scale')
-    svm_model.fit(x_train, y_train)
-    return svm_model
-
 # Train and save the model
 def train_and_save_model():
-    lstm_model = create_model_with_attention()
-    lstm_model.fit(x_train, y_train, epochs=50, validation_data=(x_test, y_test), batch_size=32, verbose=2)
-    lstm_model.save(model_path)
+    model = create_model_with_attention()
+    history = model.fit(x_train, y_train, epochs=50, validation_data=(x_test, y_test), batch_size=32, verbose=2)
+    model.save(model_path)
+    logging.info("Model trained and saved.")
+    return history
 
-    # Extract features for SVM training
-    train_features = extract_features(train_data_initial)
-    test_features = extract_features(test_data_initial)
-
-    # Labels for SVM: 1 for buy, -1 for sell, 0 for hold (based on future price movement)
-    train_labels = np.sign(np.diff(train_data_initial[time_step:], axis=0))
-    test_labels = np.sign(np.diff(test_data_initial[time_step:], axis=0))
-
-    # Train SVM model
-    scaler = StandardScaler()
-    train_features_scaled = scaler.fit_transform(train_features)
-    svm_model = train_svm_model(train_features_scaled, train_labels)
-    joblib.dump(svm_model, svm_model_path)
-    joblib.dump(scaler, scaler_path)
-    logging.info("Models (LSTM and SVM) trained and saved.")
-
-# Load the models
+# Load the model
 def load_trained_model():
     return load_model(model_path, custom_objects={'Attention': Attention})
 
-def load_trained_svm_model():
-    svm_model = joblib.load(svm_model_path)
-    scaler = joblib.load(scaler_path)
-    return svm_model, scaler
-
-# Function to predict next value using LSTM
+# Function to predict next value
 def predict_next(model, data):
     scaled_data = scaler.transform(data)
     x_input = scaled_data[-time_step:].reshape(1, time_step, 1)
@@ -203,54 +154,55 @@ def create_request(symbol, action_type, volume=0.1, deviation=10, sl_pips=50, tp
     return request
 
 # Function to handle trading logic
-def trade_logic(lstm_model, svm_model, scaler):
-    rates = mt5.copy_rates_from_pos("EURUSD", mt5.TIMEFRAME_M15, 0, time_step + 1)
+def trade_logic(model):
+    # Get latest data
+    rates = mt5.copy_rates_from_pos("AUDUSD", mt5.TIMEFRAME_M15, 0, time_step + 1)
     data = pd.DataFrame(rates).filter(['close']).values
 
-    next_price = predict_next(lstm_model, data)
+    # Predict next price
+    next_price = predict_next(model, data)
+
+    # Get current price
     current_price = data[-1][0]
 
-    # Extract features for SVM
-    latest_features = extract_features(data[-time_step:])
-    latest_features_scaled = scaler.transform(latest_features)
+    # Scale the latest data
+    latest_scaled_data = scaler.transform(data)
 
-    # SVM prediction: 1 for buy, -1 for sell, 0 for hold
-    svm_prediction = svm_model.predict(latest_features_scaled)[-1]
+    # Apply DBSCAN to the latest scaled data
+    dbscan = DBSCAN(eps=0.1, min_samples=10)
+    latest_labels = dbscan.fit_predict(latest_scaled_data)
 
-    # Apply DBSCAN to detect outliers
-    dbscan = DBSCAN(eps=0.5, min_samples=5)
-    dbscan.fit(latest_features_scaled)
-    labels = dbscan.labels_
+    # Determine if latest point is noise
+    latest_label = latest_labels[-1]
 
-    # Check if current data point is an outlier
-    if labels[-1] == -1:
-        logging.info("Detected outlier, skipping trade.")
+    # Simple strategy example
+    if latest_label == -1:
+        # If the latest point is considered noise, do not trade
+        logging.info("Current data point is noise according to DBSCAN, skipping trade.")
         return
-
-    if svm_prediction == 1:
-        request = create_request("EURUSD", mt5.ORDER_TYPE_BUY)
-    elif svm_prediction == -1:
-        request = create_request("EURUSD", mt5.ORDER_TYPE_SELL)
+    
+    if next_price > current_price:
+        # Buy signal
+        request = create_request("AUDUSD", mt5.ORDER_TYPE_BUY)
     else:
-        logging.info("Hold position based on SVM prediction.")
-        return
+        # Sell signal
+        request = create_request("AUDUSD", mt5.ORDER_TYPE_SELL)
 
+    # Send trading request
     result = mt5.order_send(request)
     logging.info(result)
 
 # Live trading loop
 def trade():
     try:
-        lstm_model = load_trained_model()
-        svm_model, scaler = load_trained_svm_model()
+        model = load_trained_model()
         while True:
             now = datetime.now()
             if now.minute % 15 == 0 and now.second == 0:  # Check every 15 minutes
-                trade_logic(lstm_model, svm_model, scaler)
+                trade_logic(model)
             if now.hour == 0 and now.minute == 0 and now.second == 0:  # Train the model daily at midnight
                 train_and_save_model()
-                lstm_model = load_trained_model()
-                svm_model, scaler = load_trained_svm_model()
+                model = load_trained_model()
             time.sleep(1)  # Sleep for a second to avoid busy waiting
     except KeyboardInterrupt:
         logging.info("Trading loop interrupted by user.")
