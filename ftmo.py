@@ -11,6 +11,9 @@ from keras.metrics import RootMeanSquaredError as rmse
 import logging
 import os
 import time
+import tensorflow as tf
+from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, LSTM, Dropout, MultiHeadAttention, Dense, LayerNormalization, Flatten
+from tensorflow.keras.models import Model
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -22,6 +25,10 @@ def initialize_mt5():
         quit()
 
 initialize_mt5()
+
+# Set start and end dates for history data
+end_date = datetime.now()
+start_date = end_date - timedelta(days=120)
 
 # Global variables
 account_balance = mt5.account_info().balance
@@ -74,23 +81,27 @@ def split_sequence(sequence, n_steps):
     return np.array(X), np.array(y)
 
 # Define the model with multi-head attention mechanism
-def create_model_with_attention():
-    model = Sequential()
-    model.add(Conv1D(filters=256, kernel_size=2, activation='relu', padding='same', input_shape=(time_step, 1)))
-    model.add(MaxPooling1D(pool_size=2))
-    model.add(LSTM(100, return_sequences=True))
-    model.add(Dropout(0.3))
-    model.add(LSTM(100, return_sequences=True))
-    model.add(Dropout(0.3))
-    model.add(MultiHeadAttention(num_heads=4, key_dim=2))
-    model.add(LayerNormalization())
-    model.add(Dense(units=2))  # Output two values: predicted price and confidence
-    model.compile(optimizer='adam', loss='mse', metrics=[rmse()])
+def create_model_with_attention(time_step):
+    inputs = Input(shape=(time_step, 1))
+    x = Conv1D(filters=256, kernel_size=2, activation='relu', padding='same')(inputs)
+    x = MaxPooling1D(pool_size=2)(x)
+    x = LSTM(100, return_sequences=True)(x)
+    x = Dropout(0.3)(x)
+    x = LSTM(100, return_sequences=True)(x)
+    x = Dropout(0.3)(x)
+    x = MultiHeadAttention(num_heads=4, key_dim=2)(x, x)
+    x = LayerNormalization()(x)
+    x = Flatten()(x)
+    outputs = Dense(units=2)(x)  # Output two values: predicted price and confidence
+    
+    model = Model(inputs, outputs)
+    model.compile(optimizer='adam', loss='mse', metrics=[tf.keras.metrics.RootMeanSquaredError()])
+    
     return model
 
 # Train and save the model with early stopping
-def train_and_save_model(symbol, x_train, y_train, x_test, y_test, early_stopping):
-    model = create_model_with_attention()
+def train_and_save_model(symbol, x_train, y_train, x_test, y_test, early_stopping, time_step):
+    model = create_model_with_attention(time_step)
     history = model.fit(x_train, y_train, epochs=100, validation_data=(x_test, y_test), batch_size=32, verbose=2, callbacks=[early_stopping])
     model.save(os.path.join(model_dir, f"{symbol}_model.keras"))
     logging.info("Model for %s trained and saved.", symbol)
@@ -239,7 +250,7 @@ def trade():
         early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
 
         # Train and save the model
-        history = train_and_save_model(symbol, x_train, y_train, x_test, y_test, early_stopping)
+        history = train_and_save_model(symbol, x_train, y_train, x_test, y_test, early_stopping, time_step)
         models[symbol] = load_trained_model(symbol)
 
     try:
