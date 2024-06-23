@@ -8,12 +8,11 @@ from datetime import timedelta, datetime
 from sklearn.preprocessing import MinMaxScaler
 import time
 from keras.models import Sequential, load_model
-from keras.layers import Dense, Activation, Conv1D, MaxPooling1D, Dropout, LSTM, Layer
+from keras.layers import Dense, Conv1D, MaxPooling1D, Dropout, LSTM, MultiHeadAttention, LayerNormalization
 from keras.metrics import RootMeanSquaredError as rmse
 from sklearn.cluster import DBSCAN
 import logging
 import os
-# import keras.backend as K
 import tensorflow.keras.backend as K
 
 # Configure logging
@@ -77,28 +76,7 @@ x_test, y_test = split_sequence(test_data_initial, time_step)
 x_train = x_train.reshape(x_train.shape[0], x_train.shape[1], 1)
 x_test = x_test.reshape(x_test.shape[0], x_test.shape[1], 1)
 
-# Define the Attention layer
-class Attention(Layer):
-    def __init__(self, **kwargs):
-        super(Attention, self).__init__(**kwargs)
-
-    def build(self, input_shape):
-        self.W = self.add_weight(name='attention_weight', shape=(input_shape[-1], 1),
-                                 initializer='random_normal', trainable=True)
-        self.b = self.add_weight(name='attention_bias', shape=(input_shape[1], 1),
-                                 initializer='zeros', trainable=True)
-        super(Attention, self).build(input_shape)
-
-    def call(self, x):
-        e = K.tanh(K.dot(x, self.W) + self.b)
-        a = K.softmax(e, axis=1)
-        output = x * a
-        return K.sum(output, axis=1)
-
-    def compute_output_shape(self, input_shape):
-        return input_shape[0], input_shape[-1]
-
-# Define the model with attention mechanism
+# Define the model with multi-head attention mechanism
 def create_model_with_attention():
     model = Sequential()
     model.add(Conv1D(filters=256, kernel_size=2, activation='relu', padding='same', input_shape=(120, 1)))
@@ -107,7 +85,8 @@ def create_model_with_attention():
     model.add(Dropout(0.3))
     model.add(LSTM(100, return_sequences=True))
     model.add(Dropout(0.3))
-    model.add(Attention())
+    model.add(MultiHeadAttention(num_heads=4, key_dim=2))
+    model.add(LayerNormalization())
     model.add(Dense(units=1, activation='sigmoid'))
     model.compile(optimizer='adam', loss='mse', metrics=[rmse()])
     return model
@@ -122,15 +101,15 @@ def train_and_save_model():
 
 # Load the model
 def load_trained_model():
-    return load_model(model_path, custom_objects={'Attention': Attention})
+    return load_model(model_path, custom_objects={'MultiHeadAttention': MultiHeadAttention})
 
 # Function to predict next value
 def predict_next(model, data):
-    scaled_data = scaler.transform(data)
-    x_input = scaled_data[-time_step:].reshape(1, time_step, 1)
-    pred = model.predict(x_input)
-    pred_price = scaler.inverse_transform(pred)
-    return pred_price[0][0]
+    scaled_data = scaler.transform(data)  # Scale the input data
+    x_input = scaled_data[-time_step:].reshape(1, time_step, 1)  # Reshape for model input
+    pred = model.predict(x_input)  # Get the model's prediction (scaled value)
+    pred_price = scaler.inverse_transform(pred)  # Inverse transform to get the actual price
+    return pred_price[0][0]  # Return the actual predicted price
 
 # Function to create a trading request
 def create_request(symbol, action_type, volume=0.1, deviation=10, sl_pips=50, tp_pips=100):
@@ -155,42 +134,35 @@ def create_request(symbol, action_type, volume=0.1, deviation=10, sl_pips=50, tp
 
 # Function to handle trading logic
 def trade_logic(model):
-    # Get latest data
     rates = mt5.copy_rates_from_pos("AUDUSD", mt5.TIMEFRAME_M15, 0, time_step + 1)
     data = pd.DataFrame(rates).filter(['close']).values
 
-    # Predict next price
     next_price = predict_next(model, data)
-
-    # Get current price
     current_price = data[-1][0]
 
-    # Scale the latest data
     latest_scaled_data = scaler.transform(data)
-
-    # Apply DBSCAN to the latest scaled data
     dbscan = DBSCAN(eps=0.1, min_samples=10)
     latest_labels = dbscan.fit_predict(latest_scaled_data)
 
-    # Determine if latest point is noise
     latest_label = latest_labels[-1]
 
-    # Simple strategy example
     if latest_label == -1:
-        # If the latest point is considered noise, do not trade
         logging.info("Current data point is noise according to DBSCAN, skipping trade.")
         return
-    
+        # Determine the trade action based on predicted price
     if next_price > current_price:
-        # Buy signal
+        logging.info("Predicted price is higher than current price, placing a buy order.")
         request = create_request("AUDUSD", mt5.ORDER_TYPE_BUY)
     else:
-        # Sell signal
+        logging.info("Predicted price is lower than current price, placing a sell order.")
         request = create_request("AUDUSD", mt5.ORDER_TYPE_SELL)
 
-    # Send trading request
+    # Send the trading request to MetaTrader5
     result = mt5.order_send(request)
-    logging.info(result)
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        logging.error("Order send failed, retcode: %d", result.retcode)
+    else:
+        logging.info("Order send successful, order: %s", result.order)
 
 # Live trading loop
 def trade():
@@ -198,9 +170,13 @@ def trade():
         model = load_trained_model()
         while True:
             now = datetime.now()
-            if now.minute % 15 == 0 and now.second == 0:  # Check every 15 minutes
+            # Execute trading logic every 15 minutes
+            if now.minute % 15 == 0 and now.second == 0:
+                logging.info("Executing trading logic.")
                 trade_logic(model)
-            if now.hour == 0 and now.minute == 0 and now.second == 0:  # Train the model daily at midnight
+            # Retrain the model daily at midnight
+            if now.hour == 0 and now.minute == 0 and now.second == 0:
+                logging.info("Retraining the model at midnight.")
                 train_and_save_model()
                 model = load_trained_model()
             time.sleep(1)  # Sleep for a second to avoid busy waiting
@@ -213,3 +189,5 @@ def trade():
 if __name__ == "__main__":
     train_and_save_model()  # Initial training
     trade()
+
+   
