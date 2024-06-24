@@ -3,15 +3,7 @@
 
 This project integrates LSTM (Long Short-Term Memory) and SVM (Support Vector Machine) models for financial time series prediction and trading using TensorFlow, Keras, and MetaTrader 5. The models are trained on historical data and utilized for real-time trading decisions.
 
-## 📁 Project Structure
 
-- **Data Retrieval**: Fetches historical financial data from MetaTrader 5.
-- **Data Preprocessing**: Prepares the data for LSTM training and SVM feature extraction.
-- **Model Training**: 
-  - Trains an LSTM model with attention mechanism for time series prediction.
-  - Trains an SVM model for classification (buy, sell, hold) based on extracted features.
-- **Model Evaluation**: Evaluates the LSTM model's performance during training.
-- **Model Saving**: Saves the trained LSTM model and SVM model for future use.
 
 ## 🔧 Requirements
 
@@ -21,28 +13,36 @@ Install the required libraries using the provided `requirements.txt` file:
 pip install -r requirements.txt
 ```
 
-🚀 New Features
-1. SVM Model Integration
-Model: Utilizes an SVM classifier trained on extracted features (moving averages, RSI) to make trading decisions.
-Integration: SVM predictions complement LSTM predictions for more robust trading strategies.
+📈 Features:
 
-3. Real-Time Trading Loop
-Live Trading: Implements a continuous trading loop based on real-time market data from MetaTrader 5.
-Trading Logic: Combines LSTM price predictions with SVM classifications to execute buy, sell, or hold trading decisions.
+* Dynamic Trailing Stop-Loss: Adjust stop-loss dynamically based on trade confidence.
 
-5. Dynamic Model Updates
-Daily Retraining: Automatically retrains both LSTM and SVM models daily at midnight to adapt to changing market conditions.
-Model Persistence: Saves and loads trained models using joblib and Keras to ensure continuous and efficient trading operations.
+* Percentage Risk-Based Lot Sizing: Implement lot sizing based on the percentage risk of the trade.
 
-📝 Usage
+* Rollover Protection: Prohibit trades during rollover periods (11pm to 1am).
 
-Initial Setup: Ensure MetaTrader 5 is installed and configured.
-Environment Setup: Install required Python libraries.
-Training: Run train_and_save_model() to initialize and train the LSTM and SVM models.
+* FTMO Rules Compliance: Check and enforce FTMO trading rules, including daily loss limits and maximum drawdown.
 
-Live Trading: Execute trade() to start the live trading loop, making real-time trading decisions based on model predictions.
+* Historical Data Retrieval: Retrieve historical data from MetaTrader5 platform for analysis and model training.
 
-📈 Future Enhancements
-Incorporate more advanced trading strategies and indicators.
-Enhance real-time data processing and decision-making capabilities.
-Optimize model hyperparameters dynamically based on market feedback.
+* Data Preparation: Prepare historical data for model training by scaling and structuring into suitable sequences.
+
+* Model Creation: Construct predictive models using Deep Learning techniques like Convolutional Neural Networks (CNNs) and Long Short-Term Memory Networks (LSTMs).
+
+* Model Training: Train models with early stopping criteria to optimize performance and prevent overfitting.
+
+* Model Loading: Load pre-trained models for real-time prediction and decision-making.
+
+* Prediction Generation: Generate price predictions, confidence levels, and trailing stop values based on current market data.
+
+* Trade Execution: Automatically execute trades based on predictive signals, dynamically adjusting take-profit and stop-loss levels.
+
+* Risk Management: Calculate trade volume based on predefined risk percentage per trade and adjust trade size to meet broker's minimum requirements.
+
+* Live Trading Loop: Continuously monitor market conditions and execute trades at specified intervals.
+
+* Interrupt Handling: Handle user interruptions gracefully during live trading sessions.
+
+
+
+
