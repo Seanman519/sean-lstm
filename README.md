@@ -3,6 +3,19 @@
 
 This project integrates LSTM (Long Short-Term Memory) and SVM (Support Vector Machine) models for financial time series prediction and trading using TensorFlow, Keras, and MetaTrader 5. The models are trained on historical data and utilized for real-time trading decisions.
 
+## 📝 To-Do Checklist
+
+- [ ] **Implement ML-Based Trailing Stop-Loss**:
+  - Determine appropriate trailing stop-loss size based on trade confidence.
+  - Tight trailing stop for scalp trades.
+  - Slower trailing stop for long swing trades.
+
+- [ ] **Incorporate Percentage Risk-Based Lot Sizing**:
+  - Implement lot sizing based on the percentage risk of the trade.
+  - Adjust lot sizes dynamically based on risk assessment.
+
+---
+
 ## 📁 Project Structure
 
 - **Data Retrieval**: Fetches historical financial data from MetaTrader 5.
