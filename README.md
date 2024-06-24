@@ -7,12 +7,13 @@ This project integrates LSTM (Long Short-Term Memory) and SVM (Support Vector Ma
 
 - [ ] **Implement ML-Based Trailing Stop-Loss**:
   - Determine appropriate trailing stop-loss size based on trade confidence.
-  - Tight trailing stop for scalp trades.
-  - Slower trailing stop for long swing trades.
 
 - [ ] **Incorporate Percentage Risk-Based Lot Sizing**:
   - Implement lot sizing based on the percentage risk of the trade.
   - Adjust lot sizes dynamically based on risk assessment.
+     
+- [ ] **Incorporate Rollover Protection**:
+  - Prohibit trades to be taken during rollover (11pm and 1am)
 
 ---
 
