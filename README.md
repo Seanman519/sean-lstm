@@ -1,5 +1,5 @@
 
-# 📊 LSTM and SVM Model for Financial Time Series Prediction and Trading
+# 📊 LSTM Model for Financial Time Series Prediction and Trading
 
 This project integrates LSTM (Long Short-Term Memory) and SVM (Support Vector Machine) models for financial time series prediction and trading using TensorFlow, Keras, and MetaTrader 5. The models are trained on historical data and utilized for real-time trading decisions.
 
