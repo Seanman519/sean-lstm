@@ -5,15 +5,16 @@ from datetime import timedelta, datetime
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import DBSCAN
 from keras.models import Sequential, load_model
-from keras.layers import Dense, Conv1D, MaxPooling1D, Dropout, LSTM, MultiHeadAttention, LayerNormalization
+from keras.layers import Dense, Conv1D, MaxPooling1D, Dropout, LSTM, MultiHeadAttention, LayerNormalization, Flatten, Input
 from keras.callbacks import EarlyStopping
 from keras.metrics import RootMeanSquaredError as rmse
 import logging
 import os
 import time
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, LSTM, Dropout, MultiHeadAttention, Dense, LayerNormalization, Flatten
-from tensorflow.keras.models import Model
+
+ROLLOVER_HOUR = 23  
+ROLLOVER_END_HOUR = 1
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,17 +29,18 @@ initialize_mt5()
 
 # Set start and end dates for history data
 end_date = datetime.now()
-start_date = end_date - timedelta(days=120)
+start_date = end_date - timedelta(days=1000)
 
 # Global variables
 account_balance = mt5.account_info().balance
 max_daily_loss = account_balance * 0.05  # 5% daily loss limit
 max_drawdown = account_balance * 0.1  # 10% overall drawdown limit
 daily_loss = 0
-symbols = ["AUDUSD", "EURUSD", "GBPUSD"]
+symbols = ["USDJPY",]
 model_dir = "models"
 os.makedirs(model_dir, exist_ok=True)
 time_step = 120
+trailing_stop_enabled = True  # Enable or disable trailing stop here
 
 # Function to check FTMO rules compliance
 def check_ftmo_compliance():
@@ -53,6 +55,10 @@ def check_ftmo_compliance():
         logging.warning("Maximum drawdown limit reached. Stopping trading.")
         return False
     return True
+
+
+
+
 
 # Get historical data
 def get_historical_data(symbol):
@@ -81,28 +87,29 @@ def split_sequence(sequence, n_steps):
     return np.array(X), np.array(y)
 
 # Define the model with multi-head attention mechanism
-def create_model_with_attention(time_step):
+def create_model_with_attention(time_step, conv_filters=256, conv_kernel_size=2, lstm_units=100, lstm_dropout=0.3, attention_heads=4, attention_key_dim=2, dense_units=3):
     inputs = Input(shape=(time_step, 1))
-    x = Conv1D(filters=256, kernel_size=2, activation='relu', padding='same')(inputs)
+    x = Conv1D(filters=conv_filters, kernel_size=conv_kernel_size, activation='relu', padding='same')(inputs)
     x = MaxPooling1D(pool_size=2)(x)
-    x = LSTM(100, return_sequences=True)(x)
-    x = Dropout(0.3)(x)
-    x = LSTM(100, return_sequences=True)(x)
-    x = Dropout(0.3)(x)
-    x = MultiHeadAttention(num_heads=4, key_dim=2)(x, x)
+    x = LSTM(lstm_units, return_sequences=True)(x)
+    x = Dropout(lstm_dropout)(x)
+    x = LSTM(lstm_units, return_sequences=True)(x)
+    x = Dropout(lstm_dropout)(x)
+    x = MultiHeadAttention(num_heads=attention_heads, key_dim=attention_key_dim)(x, x)
     x = LayerNormalization()(x)
     x = Flatten()(x)
-    outputs = Dense(units=2)(x)  # Output two values: predicted price and confidence
+    outputs = Dense(units=dense_units)(x)  # Output three values: predicted price, confidence, and trailing stop
     
-    model = Model(inputs, outputs)
+    model = tf.keras.Model(inputs, outputs)
+
     model.compile(optimizer='adam', loss='mse', metrics=[tf.keras.metrics.RootMeanSquaredError()])
     
     return model
 
 # Train and save the model with early stopping
-def train_and_save_model(symbol, x_train, y_train, x_test, y_test, early_stopping, time_step):
-    model = create_model_with_attention(time_step)
-    history = model.fit(x_train, y_train, epochs=100, validation_data=(x_test, y_test), batch_size=32, verbose=2, callbacks=[early_stopping])
+def train_and_save_model(symbol, x_train, y_train, x_test, y_test, early_stopping, time_step, conv_filters, conv_kernel_size, lstm_units, lstm_dropout, attention_heads, attention_key_dim, dense_units, batch_size, epochs):
+    model = create_model_with_attention(time_step, conv_filters, conv_kernel_size, lstm_units, lstm_dropout, attention_heads, attention_key_dim, dense_units)
+    history = model.fit(x_train, y_train, epochs=epochs, validation_data=(x_test, y_test), batch_size=batch_size, verbose=2, callbacks=[early_stopping])
     model.save(os.path.join(model_dir, f"{symbol}_model.keras"))
     logging.info("Model for %s trained and saved.", symbol)
     return history
@@ -124,7 +131,8 @@ def predict_next(model, data, scaler):
     pred = model.predict(x_input)  # Get the model's prediction (scaled value)
     pred_price = scaler.inverse_transform(pred[:, 0].reshape(-1, 1))  # Inverse transform to get the actual price
     confidence = pred[:, 1][0]  # Confidence in prediction
-    return pred_price[0][0], confidence
+    trailing_stop = pred[:, 2][0]  # Predicted trailing stop
+    return pred_price[0][0], confidence, trailing_stop
 
 # Calculate TP and SL dynamically based on model prediction
 def calculate_tp_sl(action_type, current_price, next_price, confidence, risk_reward_ratio=2):
@@ -137,7 +145,7 @@ def calculate_tp_sl(action_type, current_price, next_price, confidence, risk_rew
     return tp_price, sl_price
 
 # Create a trading request with dynamic TP and SL
-def create_request(symbol, action_type, tp_price, sl_price, deviation=10, volume=0.01):
+def create_request(symbol, action_type, tp_price, sl_price, trailing_stop, deviation=10, volume=0.01):
     if action_type == mt5.ORDER_TYPE_BUY:
         price = mt5.symbol_info_tick(symbol).ask
     else:
@@ -157,11 +165,81 @@ def create_request(symbol, action_type, tp_price, sl_price, deviation=10, volume
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
+    if trailing_stop_enabled:
+        request["trailing_stop"] = trailing_stop
     return request
+
+
+def check_rollover_time():
+    now = datetime.now()
+    if now.hour >= ROLLOVER_HOUR and now.minute >= 0:
+        logging.info("Rollover time reached. Closing all open trades.")
+        
+        # Retrieve all open positions
+        positions = mt5.positions_get()
+        
+        for position in positions:
+            if position.symbol in symbols:  # Check if the position belongs to the symbols list
+                # Close the position
+                close_request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": position.symbol,
+                    "type": mt5.ORDER_TYPE_CLOSE,
+                    "position": position.ticket,
+                    "volume": position.volume,
+                    "price": mt5.symbol_info_tick(position.symbol).bid if position.type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(position.symbol).ask,
+                    "deviation": 10,
+                    "magic": 234000,
+                    "comment": "Closing all trades at rollover time",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                
+                # Send the close order
+                result = mt5.order_send(close_request)
+                
+                if result.retcode != mt5.TRADE_RETCODE_DONE:
+                    logging.error("Failed to close trade %d for symbol %s. Error code: %d", position.ticket, position.symbol, result.retcode)
+                else:
+                    logging.info("Closed trade %d for symbol %s", position.ticket, position.symbol)
+
+def is_rollover_time():
+    now = datetime.now()
+    if now.hour >= ROLLOVER_HOUR or now.hour < ROLLOVER_END_HOUR:
+        return True
+    return False
+
+# Calculate the trade volume based on 0.1% risk per trade
+def calculate_volume(symbol, sl_price, current_price, risk_percentage=0.001):
+    account_balance = mt5.account_info().balance
+    risk_amount = account_balance * risk_percentage
+    pip_value = 0.0001  # Assuming standard pip value for forex pairs
+    volume = risk_amount / (abs(current_price - sl_price) * pip_value)
+    
+    # Ensure volume meets broker's minimum trade size or round to the nearest valid volume
+    symbol_info = mt5.symbol_info(symbol)
+    if symbol_info is None:
+        logging.error("Failed to get symbol info for %s", symbol)
+        return 0.0  # or handle the error as appropriate
+    
+    min_trade_volume = symbol_info.volume_min
+    volume = max(volume, min_trade_volume)  # Ensure volume is at least the minimum allowed
+    
+    # Round volume to nearest valid lot size
+    volume = round(volume / min_trade_volume) * min_trade_volume
+    
+    return round(volume, 2)
+
+
 
 # Handle trading logic
 def trade_logic(symbol, model, scaler):
     global daily_loss
+
+    if is_rollover_time():
+        logging.info("Rollover time. Skipping trade execution.")
+        return
+    
     if not check_ftmo_compliance():
         return
 
@@ -172,7 +250,7 @@ def trade_logic(symbol, model, scaler):
     
     data = pd.DataFrame(rates).filter(['close']).values
 
-    next_price, confidence = predict_next(model, data, scaler)
+    next_price, confidence, trailing_stop = predict_next(model, data, scaler)
     current_price = data[-1][0]
 
     latest_scaled_data = scaler.transform(data)
@@ -199,21 +277,11 @@ def trade_logic(symbol, model, scaler):
     # Calculate TP and SL dynamically
     tp_price, sl_price = calculate_tp_sl(action_type, current_price, next_price, confidence)
 
-    # Set volume based on confidence (example values, adjust as needed)
-    if confidence > 0.7:
-        volume = 0.02  # High confidence, higher volume
-    elif confidence > 0.5:
-        volume = 0.01  # Moderate confidence, standard volume
-    else:
-        volume = 0.005  # Low confidence, lower volume
-
-    # Set deviation based on price movement (example, adjust as needed)
-    predicted_price = next_price if action_type == mt5.ORDER_TYPE_BUY else current_price
-    expected_price_movement = abs(predicted_price - current_price)
-    deviation = int(expected_price_movement / 2)  # Adjust based on model's output
+    # Calculate trade volume based on risk
+    volume = calculate_volume(sl_price, current_price)
 
     # Create trading request with dynamic TP, SL, volume, and deviation
-    request = create_request(symbol, action_type, tp_price, sl_price, deviation=deviation, volume=volume)
+    request = create_request(symbol, action_type, tp_price, sl_price, trailing_stop, volume=volume)
 
     # Send the trading request to MetaTrader5
     result = mt5.order_send(request)
@@ -222,6 +290,21 @@ def trade_logic(symbol, model, scaler):
         daily_loss += abs(sl_price - current_price) * volume  # Update daily loss with the risked amount
     else:
         logging.info("Order send successful for %s, order: %s", symbol, result.order)
+        if trailing_stop_enabled:
+            logging.info("Trailing stop enabled for %s, setting trailing stop.", symbol)
+            mt5.order_send({
+                "action": mt5.TRADE_ACTION_SLTP,
+                "symbol": symbol,
+                "order": result.order,
+                "sl": sl_price,
+                "tp": tp_price,
+                "deviation": 10,
+                "magic": 234000,
+                "comment": "python script set trailing stop",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+                "trailing_stop": trailing_stop, 
+            })
 
 # Live trading loop
 def trade():
@@ -247,10 +330,20 @@ def trade():
         x_test = x_test.reshape(x_test.shape[0], x_test.shape[1], 1)
 
         # Implement early stopping
-        early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-
-        # Train and save the model
-        history = train_and_save_model(symbol, x_train, y_train, x_test, y_test, early_stopping, time_step)
+        early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+        history = train_and_save_model(
+            symbol, x_train, y_train, x_test, y_test, early_stopping, 
+            time_step, 
+            conv_filters=128, 
+            conv_kernel_size=3, 
+            lstm_units=100, 
+            lstm_dropout=0.3, 
+            attention_heads=4, 
+            attention_key_dim=2, 
+            dense_units=3,  
+            batch_size=32, 
+            epochs=2
+        )
         models[symbol] = load_trained_model(symbol)
 
     try:
@@ -287,6 +380,8 @@ def trade():
                     # Train and save the model
                     train_and_save_model(symbol, x_train, y_train, x_test, y_test, early_stopping)
                     models[symbol] = load_trained_model(symbol)
+            
+            check_rollover_time()       
             time.sleep(1)  # Sleep for a second to avoid busy waiting
     except KeyboardInterrupt:
         logging.info("Trading loop interrupted by user.")
