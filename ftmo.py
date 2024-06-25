@@ -6,7 +6,7 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import DBSCAN
 from keras.models import Sequential, load_model
 from keras.layers import Dense, Conv1D, MaxPooling1D, Dropout, LSTM, MultiHeadAttention, LayerNormalization
-from keras.callbacks import EarlyStopping
+from keras.callbacks import EarlyStopping, Callback
 from keras.metrics import RootMeanSquaredError as rmse
 import logging
 import os
@@ -15,6 +15,8 @@ import tensorflow as tf
 from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, LSTM, Dropout, MultiHeadAttention, Dense, LayerNormalization, Flatten
 from tensorflow.keras.models import Model
 from tqdm.keras import TqdmCallback
+from tqdm import tqdm
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -100,23 +102,29 @@ def create_model_with_attention(time_step):
     
     return model
 
+class MetricsCallback(Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is None:
+            logs = {}
+        tqdm.write(f"Epoch {epoch + 1} - loss: {logs.get('loss'):.4f} - val_loss: {logs.get('val_loss'):.4f} - rmse: {logs.get('root_mean_squared_error'):.4f} - val_rmse: {logs.get('val_root_mean_squared_error'):.4f}")
+
 # Train and save the model with early stopping
 def train_and_save_model(symbol, x_train, y_train, x_test, y_test, early_stopping, time_step):
     model = create_model_with_attention(time_step)
     
-    # Add TqdmCallback for the fancy progress bar
     history = model.fit(
         x_train, y_train,
-        epochs=2,
+        epochs=50,
         validation_data=(x_test, y_test),
         batch_size=32,
-        verbose=0,  # Disable default Keras progress bar
-        callbacks=[early_stopping, TqdmCallback(verbose=1)]  # Add TqdmCallback
+        verbose=0,
+        callbacks=[early_stopping, TqdmCallback(verbose=1), MetricsCallback()]
     )
     
     model.save(os.path.join(model_dir, f"{symbol}_model.keras"))
     logging.info("Model for %s trained and saved.", symbol)
     return history
+
 # Load the model
 def load_trained_model(symbol):
     model_path = os.path.join(model_dir, f"{symbol}_model.keras")
