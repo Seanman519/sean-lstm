@@ -18,14 +18,21 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # MetaTrader5 Initialization
 if not mt5.initialize():
-    logging.error("initialize() failed")
-    mt5.shutdown()
+    logging.error("MetaTrader5 initialization failed, retrying in 5 seconds...")
+    time.sleep(5)
+    if not mt5.initialize():
+        logging.error("MetaTrader5 reinitialization failed, exiting script.")
+        mt5.shutdown()
+        exit()
+else:
+    logging.info("MetaTrader5 successfully initialized.")
+
 
 # Configuration
 SYMBOL = "USDJPY"
-TIMEFRAMES = [mt5.TIMEFRAME_H4, mt5.TIMEFRAME_H1, mt5.TIMEFRAME_M15, mt5.TIMEFRAME_M1]
+TIMEFRAMES = [mt5.TIMEFRAME_H4, mt5.TIMEFRAME_H1, mt5.TIMEFRAME_M15]
 SEQ_LENGTH = 50
-INPUT_SIZE = 1
+INPUT_SIZE = 50
 HIDDEN_SIZE = 50
 OUTPUT_SIZE = 1
 NUM_LAYERS = 2
@@ -40,26 +47,56 @@ CONFIDENCE_THRESHOLD = 0.8
 MAX_DRAWDOWN = 0.03
 
 # Custom actor-critic policy with BiLSTM integration
+import torch.nn.functional as F
+
+import torch.nn.functional as F
+
 class CustomActorCriticPolicy(ActorCriticPolicy):
     def __init__(self, *args, **kwargs):
         super(CustomActorCriticPolicy, self).__init__(*args, **kwargs)
-        self.lstm = nn.LSTM(input_size=INPUT_SIZE, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, batch_first=True, bidirectional=True)
+        self.num_layers = NUM_LAYERS
+        self.lstm = nn.LSTM(input_size=INPUT_SIZE, hidden_size=HIDDEN_SIZE, num_layers=self.num_layers, batch_first=True, bidirectional=True)
         self.fc_actor = nn.Linear(HIDDEN_SIZE * 2, self.action_space.n)
         self.fc_critic = nn.Linear(HIDDEN_SIZE * 2, 1)
 
-    def forward(self, obs, deterministic=False):
-        # Extract features using the LSTM
+    def forward(self, obs, deterministic=False):  # Default deterministic to False
+        # Reshape or squeeze the observation to ensure it's 3D
+        if len(obs.shape) == 4:  # If the input is 4D, collapse it to 3D
+            obs = obs.view(obs.size(0), -1, INPUT_SIZE)  # Reshape to (batch_size, seq_length, input_size)
+        
+        # Initialize LSTM hidden states
         h0 = torch.zeros(self.num_layers * 2, obs.size(0), HIDDEN_SIZE).to(obs.device)
         c0 = torch.zeros(self.num_layers * 2, obs.size(0), HIDDEN_SIZE).to(obs.device)
+        
+        # Pass through LSTM
         lstm_out, _ = self.lstm(obs, (h0, c0))
         
+        # Get the actor and critic features
         actor_features = lstm_out[:, -1, :]
         critic_features = lstm_out[:, -1, :]
-
+        
+        # Get action logits and value estimates
         logits = self.fc_actor(actor_features)
         values = self.fc_critic(critic_features)
 
-        return logits, values
+        # Convert logits to probabilities and get log_probs
+        action_probs = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+
+        # Select action based on probabilities
+        if deterministic:
+            action = torch.argmax(action_probs, dim=1)  # Get the action with the highest probability
+        else:
+            action = torch.multinomial(action_probs, 1).squeeze(1)  # Sample an action based on the probabilities
+
+        # Get log probability of the selected action
+        selected_log_probs = log_probs.gather(1, action.unsqueeze(1)).squeeze(1)
+
+        return action, values, selected_log_probs
+
+
+
+
 
 
 # Environment setup for SMC/ICT market strategies with multiple timeframes and drawdown control
@@ -75,11 +112,12 @@ class MarketEnv(gym.Env):
         self.highest_balance = self.initial_balance
         self.llm_usage_threshold = 0.05  # Threshold for volatility to trigger LLM
 
-        # Action space: Buy, Sell, Hold
-        self.action_space = spaces.Discrete(3)
+        # Action space: Buy (0), Sell (1), Hold (2)
+        self.action_space = spaces.Discrete(3)  # Correctly define as Discrete for 3 actions
         
         # Observation space: price data sequence for each timeframe
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(len(timeframes), seq_length, INPUT_SIZE), dtype=np.float32)
+
         
         # Fetch initial market data for all timeframes
         self.data = {tf: fetch_data(self.symbol, tf) for tf in self.timeframes}
@@ -88,16 +126,36 @@ class MarketEnv(gym.Env):
     def reset(self):
         self.current_step = 0
         self.data = {tf: fetch_data(self.symbol, tf) for tf in self.timeframes}
+        
+        # Preprocess the fetched data
+        for tf in self.timeframes:
+            if self.data[tf] is not None:
+                self.data[tf] = preprocess_data(self.data[tf])
+            if self.data[tf] is None or 'scaled_close' not in self.data[tf].columns:
+                logging.error(f"Preprocessed data for timeframe {tf} is missing 'scaled_close'. Reset failed.")
+                return self.reset()  # Retry or handle as necessary
+        
         self.current_balance = self.initial_balance
         self.highest_balance = self.initial_balance
         return self._next_observation()
 
+
     def _next_observation(self):
-        # Combine data from multiple timeframes into a single observation
         obs = []
         for tf in self.timeframes:
-            obs.append(self.data[tf]['scaled_close'].values[self.current_step:self.current_step + self.seq_length])
+            # Check if the data for the current timeframe is long enough
+            if len(self.data[tf]['scaled_close'].values) >= self.current_step + self.seq_length:
+                obs.append(self.data[tf]['scaled_close'].values[self.current_step:self.current_step + self.seq_length])
+            else:
+                # If the data is not long enough, fill the missing part with zeros
+                missing_length = self.seq_length - len(self.data[tf]['scaled_close'].values[self.current_step:])
+                valid_data = self.data[tf]['scaled_close'].values[self.current_step:]
+                obs.append(np.concatenate([valid_data, np.zeros(missing_length)]))
+
+        # Convert the list of arrays to a NumPy array and reshape to (timeframes, seq_length, 1)
         return np.array(obs).reshape(len(self.timeframes), self.seq_length, 1)
+
+
 
     def step(self, action):
         reward = self._calculate_reward(action)
@@ -119,7 +177,6 @@ class MarketEnv(gym.Env):
         return obs, reward, done, {}
 
     def _calculate_reward(self, action):
-        reward = 0
         current_price = self.data[mt5.TIMEFRAME_M15]['close'].values[self.current_step + self.seq_length - 1]
         next_price = self.data[mt5.TIMEFRAME_M15]['close'].values[self.current_step + self.seq_length]
         
@@ -129,12 +186,12 @@ class MarketEnv(gym.Env):
             reward = current_price - next_price
         elif action == 2:  # Hold
             reward = -abs(next_price - current_price) * 0.1  # Small penalty for holding
-
-        # Simulate balance changes based on reward
-        self.current_balance += reward
-        self.highest_balance = max(self.highest_balance, self.current_balance)
         
+        # Add a penalty if the agent makes poor decisions
+        if self.current_balance < self.initial_balance:
+            reward -= 10  # Larger penalty for losses
         return reward
+
 
     def _check_volatility(self):
         """Check if market volatility exceeds a threshold, triggering the LLM."""
@@ -177,21 +234,37 @@ class BiLSTM(nn.Module):
 
 
 
-def fetch_data(symbol, timeframe, n=120):
+def fetch_data(symbol, timeframe, n=120, retries=3):
     utc_from = datetime.now() - timedelta(days=n)
-    rates = mt5.copy_rates_range(symbol, timeframe, utc_from, datetime.now())
-    if rates is None:
-        logging.error("Failed to fetch data")
-        return None
-    rates_frame = pd.DataFrame(rates)
-    rates_frame['time'] = pd.to_datetime(rates_frame['time'], unit='s')
-    return rates_frame
+    attempt = 0
+    while attempt < retries:
+        rates = mt5.copy_rates_range(symbol, timeframe, utc_from, datetime.now())
+        if rates is None or len(rates) == 0:
+            logging.error(f"Attempt {attempt+1}: Failed to fetch data for {symbol} on timeframe {timeframe}. Retrying...")
+            attempt += 1
+            time.sleep(5)  # Wait before retrying
+        else:
+            logging.info(f"Data successfully fetched for {symbol} on timeframe {timeframe}")
+            rates_frame = pd.DataFrame(rates)
+            rates_frame['time'] = pd.to_datetime(rates_frame['time'], unit='s')
+            return rates_frame
+    logging.error(f"Failed to fetch data after {retries} attempts for {symbol} on timeframe {timeframe}")
+    return None  # Return None if all attempts fail
+
 
 
 def preprocess_data(data):
+    if data is None or 'close' not in data.columns:
+        logging.error("Data is None or 'close' column missing, skipping preprocessing.")
+        return None
+
+    # Scaling 'close' prices
     data['close'] = data['close'].astype(float)
-    data['scaled_close'] = (data['close'] - data['close'].mean()) / data['close'].std()
+    data['scaled_close'] = (data['close'] - data['close'].mean()) / data['close'].std()  # Add scaled_close
+    logging.info("Data preprocessing complete.")
     return data
+
+
 
 
 def create_sequences(data, seq_length=50):
@@ -338,27 +411,50 @@ def fetch_news_and_analyze_sentiment():
     return sentiment_score
 
 # Main loop for running the model
-def run_model_loop():
-    model = load_model(MODEL_PATH)
-    while True:
-        data = fetch_data(SYMBOL, mt5.TIMEFRAME_M15)
-        if data is not None:
-            data = preprocess_data(data)
-            sentiment_score = fetch_news_and_analyze_sentiment()
-            predict_and_trade(data, model, SEQ_LENGTH, LOT_SIZE, sentiment_score)
-        time.sleep(PREDICTION_INTERVAL)
-
-# RL Training function with PPO
 def train_rl_model():
+    # Initialize the MarketEnv for RL training
     env = MarketEnv(SYMBOL, TIMEFRAMES)
-    model = PPO(CustomActorCriticPolicy, env, verbose=1)
+    
+    # Define and initialize PPO model with custom policy
+    model = PPO(CustomActorCriticPolicy, env, verbose=1, clip_range=0.3, learning_rate=LEARNING_RATE)
+    
+    # Train the PPO model
     model.learn(total_timesteps=100000)
+    
+    # Save the trained model after the training loop finishes
     model.save("ppo_smc_ict")
     
+    logging.info("RL model training completed and saved.")
     return model
 
-# Train RL model
-rl_model = train_rl_model()
 
-# Start trading loop with trained model
-run_model_loop()
+def run_trading_loop():
+    # Load the trained BiLSTM model for trading
+    model = load_model(MODEL_PATH)
+    
+    # Start the trading loop with the trained model
+    while True:
+        # Fetch fresh market data
+        data = fetch_data(SYMBOL, mt5.TIMEFRAME_M15)
+        
+        # Proceed only if data is successfully fetched
+        if data is not None:
+            # Preprocess the market data
+            data = preprocess_data(data)
+            
+            # Get sentiment score using LLM-based news analysis
+            sentiment_score = fetch_news_and_analyze_sentiment()
+            
+            # Make predictions and trade based on the BiLSTM model
+            predict_and_trade(data, model, SEQ_LENGTH, LOT_SIZE, sentiment_score)
+        
+        # Pause for the prediction interval before running the next loop iteration
+        time.sleep(PREDICTION_INTERVAL)
+
+
+if __name__ == "__main__":
+    # Train the RL model first
+    rl_model = train_rl_model()
+
+    # Start the trading loop using the trained model
+    run_trading_loop()
