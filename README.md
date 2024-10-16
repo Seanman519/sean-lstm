@@ -1,13 +1,38 @@
-# LSTM-LLM Trading Bot
-# 🚀 An AI-Powered Trading Bot using Deep Learning and Sentiment Analysis 🚀
+# Reinforcement Learning for Financial Markets using BiLSTM, LLM and PPO
 
-This project combines deep learning and LLM-based sentiment analysis to automate complex trading decisions on the MetaTrader 5 (MT5) platform. It features a custom BiLSTM (Bidirectional Long Short-Term Memory) model for time series prediction and integrates financial news sentiment analysis using transformers to create a robust, AI-driven trading strategy.
+This project implements a trading algorithm that leverages **Reinforcement Learning (RL)**, **BiLSTM neural networks**, and **transformer-based sentiment analysis** for **financial market predictions**. It integrates with MetaTrader5 for real-time trading and uses market data across multiple timeframes. The system is capable of analyzing market volatility and news sentiment, adjusting trading strategies accordingly.
 
-Key Features
-* BiLSTM Model: Trained to predict future Forex price movements using historical data.
+> **Note:** This codebase is under active development and maintenance. New features and improvements are regularly added, and more insights will be shared as the research progresses.
 
-* Sentiment Analysis with LLMs: Real-time sentiment analysis on financial news using the Hugging Face transformers library.
+## Features
 
-* Automated Trading: Executes buy, sell, or hold decisions based on both price predictions and market sentiment.
+- **Reinforcement Learning (RL)** using **Proximal Policy Optimization (PPO)**.
+- Custom **Actor-Critic policy** with **BiLSTM** for market prediction.
+- **MetaTrader5 integration** for real-time market data and trade execution.
+- Sentiment analysis using **transformer-based language models** to incorporate news data into trading decisions.
+- Multi-timeframe analysis with support for **SMC/ICT** market strategies.
+- Built-in risk management through **maximum drawdown limits** and dynamic decision-making.
 
-* MetaTrader 5 Integration: Fully integrated with MT5 to fetch live market data and execute trades.
+## Project Structure
+
+- **`anita.py`**: Main script that runs the entire trading system, combining market prediction, RL strategies, and trading execution.
+- **`bilstm_modelnews.pth`**: Pre-trained BiLSTM model for market predictions.
+- **`MarketEnv`**: Custom environment class for simulating financial markets with multi-timeframe data.
+- **`BiLSTM`**: Neural network model for predicting market trends.
+- **`CustomActorCriticPolicy`**: Policy for RL training using PPO.
+- **`fetch_data`, `preprocess_data`, `fetch_news_and_analyze_sentiment`**: Utility functions for data retrieval, processing, and sentiment analysis.
+
+
+To run the system, simply execute the `anita.py` script:
+
+```bash
+python anita.py
+```
+
+## Support
+
+If you find this project helpful and would like to support the continued development and maintenance, you can [**Buy Me a Coffee**](https://www.buymeacoffee.com/seany519). Your support will help fund additional research and future updates.
+
+
+
+
